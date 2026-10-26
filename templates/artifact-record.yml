@@ -1,0 +1,32 @@
+# Runs last in every pipeline. Downloads all earlier artifacts, hashes everything under gp-artifacts/,
+# and writes artifact-manifest.json (schema: artifacts/manifest.schema.json). Include it once per pipeline.
+spec:
+  inputs:
+    retention:
+      default: 1 year
+    image:
+      default: alpine:3.20   # pin by digest
+---
+gp-artifact-record:
+  stage: .post
+  image: $[[ inputs.image ]]
+  when: always
+  script:
+    - |
+      {
+        printf '{\n  "pipeline_id": %s,\n  "pipeline_url": "%s",\n  "project": "%s",\n  "commit": "%s",\n  "ref": "%s",\n  "created_at": "%s",\n  "artifacts": [' \
+          "$CI_PIPELINE_ID" "$CI_PIPELINE_URL" "$CI_PROJECT_PATH" "$CI_COMMIT_SHA" "$CI_COMMIT_REF_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        sep=""
+        find gp-artifacts -type f 2>/dev/null | sort | while read -r f; do
+          set -- $(sha256sum "$f")
+          printf '%s\n    {"path": "%s", "producer": "%s", "sha256": "%s", "bytes": %s}' \
+            "$sep" "$f" "$(echo "$f" | cut -d/ -f2)" "$1" "$(wc -c < "$f" | tr -d ' ')"
+          sep=","
+        done
+        printf '\n  ]\n}\n'
+      } > artifact-manifest.json
+    - cat artifact-manifest.json
+  artifacts:
+    expire_in: $[[ inputs.retention ]]
+    paths:
+      - artifact-manifest.json

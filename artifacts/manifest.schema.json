@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Artifact manifest",
+  "description": "Written by the artifact-record component: one entry per file under gp-artifacts/ in a pipeline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pipeline_id", "pipeline_url", "project", "commit", "ref", "created_at", "artifacts"],
+  "properties": {
+    "pipeline_id": {"type": "integer"},
+    "pipeline_url": {"type": "string", "format": "uri"},
+    "project": {"type": "string"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "ref": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "producer", "sha256", "bytes"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^gp-artifacts/"},
+          "producer": {"type": "string", "description": "<component>-<app>[-<env>], the folder the job wrote to"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

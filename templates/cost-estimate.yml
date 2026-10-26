@@ -1,0 +1,53 @@
+# Posts the monthly cost change of the saved plan. Never blocks; shows a warning over the threshold.
+spec:
+  inputs:
+    stage:
+      default: review
+    app:
+      description: App name; must match the tofu-plan include
+    env:
+      options: [dev, stage, uat, prod]
+    changes:
+      default: "**/*"
+    branches:
+      default: any
+      options: [any, default]
+      description: Must match the tofu-plan include
+    warn_over_usd:
+      type: number
+      default: 100
+    image:
+      default: infracost/infracost:ci-0.10   # pin by digest
+---
+"gp-cost-estimate-$[[ inputs.app ]]-$[[ inputs.env ]]":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  needs:
+    - job: "gp-tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]"
+      artifacts: true
+  allow_failure: true
+  variables:
+    PLAN_JSON: $CI_PROJECT_DIR/gp-artifacts/tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]/plan.json
+    OUT: $CI_PROJECT_DIR/gp-artifacts/cost-estimate-$[[ inputs.app ]]-$[[ inputs.env ]]
+    GP_BRANCHES: $[[ inputs.branches ]]
+  script:
+    - mkdir -p "$OUT"
+    - infracost breakdown --path "$PLAN_JSON" --format json --out-file "$OUT/infracost.json"
+    - infracost output --path "$OUT/infracost.json" --format table --out-file "$OUT/infracost.txt"
+    - cat "$OUT/infracost.txt"
+    - DIFF=$(jq -r '.diffTotalMonthlyCost // "0"' "$OUT/infracost.json")
+    - |
+      if awk -v d="$DIFF" -v t="$[[ inputs.warn_over_usd ]]" 'BEGIN { exit !(d > t) }'; then
+        echo "Monthly cost change of $DIFF USD is over the $[[ inputs.warn_over_usd ]] USD threshold"
+        exit 3
+      fi
+  artifacts:
+    expire_in: 90 days
+    paths:
+      - gp-artifacts/cost-estimate-$[[ inputs.app ]]-$[[ inputs.env ]]/
+  rules:
+    - if: $GP_BRANCHES == "default" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+    - changes: ["$[[ inputs.changes ]]"]

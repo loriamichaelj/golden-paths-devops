@@ -1,0 +1,34 @@
+# Static scan of the app folder with the platform scanner image. Scanners report; gate.py decides the exit code.
+spec:
+  inputs:
+    stage:
+      default: validate
+    app:
+      description: App name; used in job names and artifact folders
+    app_dir:
+      description: Folder to scan
+    changes:
+      default: "**/*"
+    image:
+      description: Platform scanner image, for example $CI_REGISTRY/michaeljloria/golden-paths-platform/scanner:0.1.0
+---
+"gp-security-scan-$[[ inputs.app ]]":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  variables:
+    OUT: $CI_PROJECT_DIR/gp-artifacts/security-scan-$[[ inputs.app ]]
+  script:
+    - mkdir -p "$OUT"
+    - gold-scan static --path "$[[ inputs.app_dir ]]" --out "$OUT"   # writes gl-code-quality-report.json and results.sarif
+  artifacts:
+    when: always
+    access: developer   # finding details stay with project members
+    expire_in: 90 days
+    paths:
+      - gp-artifacts/security-scan-$[[ inputs.app ]]/
+    reports:
+      codequality: gp-artifacts/security-scan-$[[ inputs.app ]]/gl-code-quality-report.json
+  rules:
+    - changes: ["$[[ inputs.changes ]]"]

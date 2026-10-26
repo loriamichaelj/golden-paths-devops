@@ -1,0 +1,41 @@
+# Validates golden-path.yaml with the pinned gold release and keeps the explain output for review.
+spec:
+  inputs:
+    stage:
+      default: validate
+    app:
+      description: App name; used in job names and artifact folders
+    app_dir:
+      description: Folder that holds the app's golden-path.yaml
+    changes:
+      default: "**/*"
+    gold_project:
+      description: URL-encoded path of the project that publishes gold, for example acme%2Fplatform
+    gold_version:
+      description: gold release, for example 0.4.0
+    image:
+      default: alpine:3.20   # pin by digest
+---
+"gp-contract-validate-$[[ inputs.app ]]":
+  stage: $[[ inputs.stage ]]
+  image: $[[ inputs.image ]]
+  variables:
+    OUT: $CI_PROJECT_DIR/gp-artifacts/contract-validate-$[[ inputs.app ]]
+  script:
+    - apk add --no-cache curl
+    - BASE="$CI_API_V4_URL/projects/$[[ inputs.gold_project ]]/packages/generic/gold/$[[ inputs.gold_version ]]"
+    - 'curl -fsSL -H "JOB-TOKEN: $CI_JOB_TOKEN" -o gold.tar.gz "$BASE/gold_linux_amd64.tar.gz"'
+    - 'curl -fsSL -H "JOB-TOKEN: $CI_JOB_TOKEN" -o checksums.txt "$BASE/checksums.txt"'
+    - grep ' gold_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
+    - tar -xzf gold.tar.gz gold && mv gold /usr/local/bin/gold
+    - mkdir -p "$OUT"
+    - cd "$[[ inputs.app_dir ]]"
+    - gold validate --strict --format json > "$OUT/validate.json"
+    - gold explain --format json > "$OUT/explain.json"
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - gp-artifacts/contract-validate-$[[ inputs.app ]]/
+  rules:
+    - changes: ["$[[ inputs.changes ]]"]

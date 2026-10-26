@@ -1,0 +1,80 @@
+# Applies the saved plan from tofu-plan in a GitLab environment. Default branch only; never re-plans.
+spec:
+  inputs:
+    stage:
+      default: deploy
+    app:
+      description: App name; must match the tofu-plan include
+    env:
+      options: [dev, stage, uat, prod]
+    root_dir:
+      description: Same root module as the tofu-plan include
+    changes:
+      default: "**/*"
+    deployment_tier:
+      options: [development, staging, testing, production]
+      description: Required, so prod can't silently land in an unprotected tier
+    when:
+      default: on_success
+      options: [on_success, manual]
+
+    cloud:
+      options: [aws, azure]
+    role:
+      description: AWS role ARN or Azure client ID that trusts this job. Not a secret.
+    azure_tenant:
+      default: ""
+    azure_subscription:
+      default: ""
+    image:
+      default: ghcr.io/opentofu/opentofu:1.11   # pin by digest
+---
+"gp-tofu-apply-$[[ inputs.app ]]-$[[ inputs.env ]]":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  id_tokens:
+    OIDC_TOKEN:
+      aud: https://gitlab.com
+  needs:
+    - job: "gp-tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]"
+      artifacts: true
+  resource_group: $[[ inputs.app ]]-$[[ inputs.env ]]
+  environment:
+    name: $[[ inputs.env ]]/$[[ inputs.app ]]
+    deployment_tier: $[[ inputs.deployment_tier ]]
+  variables:
+    PLAN: $CI_PROJECT_DIR/gp-artifacts/tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]/plan.tfplan
+    OUT: $CI_PROJECT_DIR/gp-artifacts/tofu-apply-$[[ inputs.app ]]-$[[ inputs.env ]]
+  before_script:
+    - |
+      case "$[[ inputs.cloud ]]" in
+        aws)
+          GP_TOKEN_FILE=$(mktemp) && printf '%s' "$OIDC_TOKEN" > "$GP_TOKEN_FILE"
+          export AWS_WEB_IDENTITY_TOKEN_FILE="$GP_TOKEN_FILE" AWS_ROLE_ARN="$[[ inputs.role ]]" AWS_ROLE_SESSION_NAME="gp-$CI_JOB_ID"
+          ;;
+        azure)
+          export ARM_USE_OIDC=true ARM_OIDC_TOKEN="$OIDC_TOKEN" ARM_CLIENT_ID="$[[ inputs.role ]]" \
+            ARM_TENANT_ID="$[[ inputs.azure_tenant ]]" ARM_SUBSCRIPTION_ID="$[[ inputs.azure_subscription ]]"
+          ;;
+        *)
+          echo "gp: cloud '$[[ inputs.cloud ]]' isn't supported yet" >&2; exit 1
+          ;;
+      esac
+  script:
+    - set -o pipefail
+    - mkdir -p "$OUT"
+    - cd "$[[ inputs.root_dir ]]"
+    - tofu init -input=false -backend-config="envs/$[[ inputs.env ]].backend.hcl"
+    - tofu apply -input=false "$PLAN" | tee "$OUT/apply.log"
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 1 year
+    paths:
+      - gp-artifacts/tofu-apply-$[[ inputs.app ]]-$[[ inputs.env ]]/
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: ["$[[ inputs.changes ]]"]
+      when: $[[ inputs.when ]]

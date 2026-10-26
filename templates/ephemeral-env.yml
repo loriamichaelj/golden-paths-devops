@@ -1,0 +1,123 @@
+# A review environment per merge request, deleted on demand, on expiry, or by the sweeper.
+# Uses GitLab-managed state and the sandbox role only; it can never reach dev, stage, UAT or prod.
+spec:
+  inputs:
+    deploy_stage:
+      default: deploy
+    destroy_stage:
+      default: cleanup
+    app:
+      description: App name; used in job names, the env ID and artifact folders
+    root_dir:
+      description: The app's OpenTofu root module
+    changes:
+      default: "**/*"
+    ttl:
+      default: 72h
+      description: Must equal the contract's ttl
+    auto_stop_in:
+      default: 3 days
+      description: The same TTL in GitLab's format
+    sandbox_kms_key:
+      default: alias/gp-sandbox
+      description: State and plan encryption key in the sandbox (one per pooled account)
+    platform_project:
+      description: Path of the platform project, for example acme/platform
+    scripts_ref:
+      description: Scripts release tag, for example scripts-v0.1.0
+
+    cloud:
+      options: [aws, azure]
+    role:
+      description: AWS role ARN or Azure client ID that trusts this job. Not a secret.
+    azure_tenant:
+      default: ""
+    azure_subscription:
+      default: ""
+    image:
+      default: ghcr.io/opentofu/opentofu:1.11   # needs a shell and git; pin by digest
+---
+".gp-ephemeral-$[[ inputs.app ]]":
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  id_tokens:
+    OIDC_TOKEN:
+      aud: https://gitlab.com
+  variables:
+    ENV_ID: review-$[[ inputs.app ]]-$CI_MERGE_REQUEST_IID
+    TTL: $[[ inputs.ttl ]]
+    OUT: $CI_PROJECT_DIR/gp-artifacts/ephemeral-env-$[[ inputs.app ]]
+    TF_VARS: -var env=ephemeral -var env_id=review-$[[ inputs.app ]]-$CI_MERGE_REQUEST_IID -var ttl=$[[ inputs.ttl ]] -var state_kms_key_id=$[[ inputs.sandbox_kms_key ]]
+  before_script:
+    - |
+      case "$[[ inputs.cloud ]]" in
+        aws)
+          GP_TOKEN_FILE=$(mktemp) && printf '%s' "$OIDC_TOKEN" > "$GP_TOKEN_FILE"
+          export AWS_WEB_IDENTITY_TOKEN_FILE="$GP_TOKEN_FILE" AWS_ROLE_ARN="$[[ inputs.role ]]" AWS_ROLE_SESSION_NAME="gp-$CI_JOB_ID"
+          ;;
+        azure)
+          export ARM_USE_OIDC=true ARM_OIDC_TOKEN="$OIDC_TOKEN" ARM_CLIENT_ID="$[[ inputs.role ]]" \
+            ARM_TENANT_ID="$[[ inputs.azure_tenant ]]" ARM_SUBSCRIPTION_ID="$[[ inputs.azure_subscription ]]"
+          ;;
+        *)
+          echo "gp: cloud '$[[ inputs.cloud ]]' isn't supported yet" >&2; exit 1
+          ;;
+      esac
+    - git clone --quiet --depth 1 --branch "$[[ inputs.scripts_ref ]]" "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/$[[ inputs.platform_project ]].git" "$CI_BUILDS_DIR/gp-platform"
+    - export PATH="$CI_BUILDS_DIR/gp-platform/scripts:$PATH"
+    - mkdir -p "$OUT"
+    - cd "$[[ inputs.root_dir ]]"
+    # Review environments use GitLab-managed state instead of the environment's bucket.
+    - printf 'terraform {\n  backend "http" {}\n}\n' > gp_backend_override.tf
+    - STATE="$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$ENV_ID"
+    - >-
+      tofu init -input=false -reconfigure
+      -backend-config="address=$STATE" -backend-config="lock_address=$STATE/lock" -backend-config="unlock_address=$STATE/lock"
+      -backend-config="lock_method=POST" -backend-config="unlock_method=DELETE" -backend-config="retry_wait_min=5"
+      -backend-config="username=gitlab-ci-token" -backend-config="password=$CI_JOB_TOKEN"
+
+"gp-ephemeral-deploy-$[[ inputs.app ]]":
+  extends: ".gp-ephemeral-$[[ inputs.app ]]"
+  stage: $[[ inputs.deploy_stage ]]
+  script:
+    - tofu apply -input=false -auto-approve $TF_VARS   # no saved plan: nobody reviews review environments
+    - >-
+      printf '{"env_id": "%s", "app": "%s", "merge_request": "%s", "ttl": "%s", "deployed_at": "%s", "pipeline_url": "%s"}\n'
+      "$ENV_ID" "$[[ inputs.app ]]" "$CI_MERGE_REQUEST_IID" "$TTL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CI_PIPELINE_URL" > "$OUT/env.json"
+  environment:
+    name: review/$[[ inputs.app ]]-$CI_MERGE_REQUEST_IID
+    on_stop: "gp-ephemeral-destroy-$[[ inputs.app ]]"
+    auto_stop_in: $[[ inputs.auto_stop_in ]]
+  artifacts:
+    expire_in: 1 year
+    paths:
+      - gp-artifacts/ephemeral-env-$[[ inputs.app ]]/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: ["$[[ inputs.changes ]]"]
+
+"gp-ephemeral-destroy-$[[ inputs.app ]]":
+  extends: ".gp-ephemeral-$[[ inputs.app ]]"
+  stage: $[[ inputs.destroy_stage ]]
+  script:
+    - wait-drained.sh "$ENV_ID"      # Kubernetes paths only; waits on cloud APIs, no cluster credentials
+    - tofu destroy -input=false -auto-approve $TF_VARS
+    - verify-empty.sh "$ENV_ID"      # fails if anything tagged with the env ID remains
+    - sandbox-release.sh "$ENV_ID"   # drops the MR database; on AWS, wipes and returns the pooled account
+    - >-
+      printf '{"env_id": "%s", "destroyed_at": "%s"}\n'
+      "$ENV_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/destroyed.json"
+  environment:
+    name: review/$[[ inputs.app ]]-$CI_MERGE_REQUEST_IID
+    action: stop
+  artifacts:
+    when: always
+    expire_in: 1 year
+    paths:
+      - gp-artifacts/ephemeral-env-$[[ inputs.app ]]/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: ["$[[ inputs.changes ]]"]
+      when: manual
+  allow_failure: true

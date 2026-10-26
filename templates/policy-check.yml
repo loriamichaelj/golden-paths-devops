@@ -1,0 +1,48 @@
+# Tests the saved plan against the platform's Conftest rules, pulled at a pinned policy tag.
+spec:
+  inputs:
+    stage:
+      default: review
+    app:
+      description: App name; must match the tofu-plan include
+    env:
+      options: [dev, stage, uat, prod]
+    changes:
+      default: "**/*"
+    branches:
+      default: any
+      options: [any, default]
+      description: Must match the tofu-plan include
+    platform_project:
+      description: Path of the platform project, for example acme/platform
+    policy_ref:
+      description: Policy release tag, for example policy-v0.1.0
+    image:
+      default: openpolicyagent/conftest:v0.56.0   # pin by digest; verify the tag
+---
+"gp-policy-check-$[[ inputs.app ]]-$[[ inputs.env ]]":
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  needs:
+    - job: "gp-tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]"
+      artifacts: true
+  variables:
+    PLAN_JSON: $CI_PROJECT_DIR/gp-artifacts/tofu-plan-$[[ inputs.app ]]-$[[ inputs.env ]]/plan.json
+    OUT: $CI_PROJECT_DIR/gp-artifacts/policy-check-$[[ inputs.app ]]-$[[ inputs.env ]]
+    GP_BRANCHES: $[[ inputs.branches ]]
+  script:
+    - mkdir -p "$OUT"
+    - conftest pull --policy "$CI_BUILDS_DIR/gp-policy" "git::https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/$[[ inputs.platform_project ]].git//policy/conftest?ref=$[[ inputs.policy_ref ]]"
+    - conftest test --policy "$CI_BUILDS_DIR/gp-policy" --output json "$PLAN_JSON" > "$OUT/conftest.json"
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 90 days
+    paths:
+      - gp-artifacts/policy-check-$[[ inputs.app ]]-$[[ inputs.env ]]/
+  rules:
+    - if: $GP_BRANCHES == "default" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+    - changes: ["$[[ inputs.changes ]]"]
